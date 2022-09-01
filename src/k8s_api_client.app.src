@@ -1,0 +1,19 @@
+{application, k8s_api_client,
+ [{description, "Kubernetes API client"},
+  {vsn, "0.1.0"},
+  {registered, []},
+  {applications,
+   [kernel,
+    stdlib,
+    jsx,
+    fast_yaml,
+    jesse,
+    gun
+   ]},
+  {mod, {k8s_api_client_app, []}},
+  {env,[]},
+  {modules, []},
+
+  {licenses, ["Apache 2.0"]},
+  {links, []}
+ ]}.
