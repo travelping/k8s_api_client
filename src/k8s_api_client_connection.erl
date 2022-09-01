@@ -9,6 +9,7 @@
 
 -export([start_pool/0, await_up/0,
 	 get/2, get/3,
+	 patch/2, patch/3, patch/4,
 	 post/2, post/3, post/4,
 	 put/2, put/3, put/4]).
 
@@ -53,6 +54,17 @@ get(Path, Headers) ->
 
 get(Path, Headers, ReqOpts) ->
     gun_pool:get(Path, headers(Headers), ReqOpts).
+
+patch(Path, Headers) ->
+    gun_pool:patch(Path, headers(Headers)).
+
+patch(Path, Headers, ReqOpts) when is_map(ReqOpts) ->
+    gun_pool:patch(Path, headers(Headers), ReqOpts);
+patch(Path, Headers, Body) ->
+    gun_pool:patch(Path, headers(Headers), Body).
+
+patch(Path, Headers, Body, ReqOpts) ->
+    gun_pool:patch(Path, headers(Headers), Body, ReqOpts).
 
 post(Path, Headers) ->
     gun_pool:post(Path, headers(Headers)).

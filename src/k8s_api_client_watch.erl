@@ -12,12 +12,10 @@
 -behavior(gen_statem).
 
 %% API
--export([start_link/1]).
+-export([start_link/1, all/1]).
 
 %% gen_statem callbacks
 -export([callback_mode/0, init/1, handle_event/4, terminate/3, code_change/4]).
-
--define(SERVER, ?MODULE).
 
 -include_lib("kernel/include/logger.hrl").
 
@@ -29,8 +27,11 @@
 %%%===================================================================
 
 start_link(Watch) ->
-    Opts = [{debug, ?DEBUG_OPTS}],
-    gen_statem:start_link({local, ?SERVER}, ?MODULE, [Watch], Opts).
+    SpawnOpts = [{fullsweep_after, 0}],
+    proc_lib:start_link(?MODULE, init, [[self(), Watch]], infinity, SpawnOpts).
+
+all({_, TID}) ->
+    ets:tab2list(TID).
 
 %%%===================================================================
 %%% gen_statem callbacks
@@ -38,10 +39,10 @@ start_link(Watch) ->
 
 callback_mode() -> [handle_event_function, state_enter].
 
-init([Watch]) ->
+init([Parent, Watch]) ->
     process_flag(trap_exit, true),
 
-    TID = ets:new(?SERVER, [set, public, {keypos, 1}]),
+    TID = ets:new(?MODULE, [set, public, {keypos, 1}]),
 
     Config = k8s_api_client_cfg:get_simple(),
 
@@ -57,13 +58,19 @@ init([Watch]) ->
 	    },
 
     Path = query(Watch, false, Config, Data),
-    Headers = headers(Config),
+    Headers = k8s_api_client_resource:headers(Config),
 
     ?LOG(debug, "Path: ~p~nHeaders: ~p~n", [Path, Headers]),
     {async, {ConnPid, StreamRef}} =
 	k8s_api_client_connection:get(Path, Headers),
+    monitor(process, ConnPid),
 
-    {ok, {loading, init}, Data#{conn := ConnPid, stream := StreamRef}}.
+    %% gen_statem init return does not allow extra terms
+    proc_lib:init_ack(Parent, {ok, self(), handle(Data)}),
+
+    LoopOpts = [{debug, ?DEBUG_OPTS}],
+    gen_statem:enter_loop(
+      ?MODULE, LoopOpts, {loading, init}, Data#{conn := ConnPid, stream := StreamRef}).
 
 handle_event(enter, _, {watch, init}, #{pending := Pending})
   when Pending =/= <<>> ->
@@ -72,11 +79,12 @@ handle_event(enter, _, {watch, init}, #{pending := Pending})
 
 handle_event(enter, _, {watch, init}, #{config := Config, watch := Watch} = Data) ->
     Path = query(Watch, true, Config, Data),
-    Headers = headers(Config),
+    Headers = k8s_api_client_resource:headers(Config),
 
     ?LOG(debug, "Path: ~p~nHeaders: ~p~n", [Path, Headers]),
     {async, {ConnPid, StreamRef}} =
 	k8s_api_client_connection:get(Path, Headers),
+    monitor(process, ConnPid),
     {keep_state, Data#{conn := ConnPid, stream := StreamRef}};
 
 handle_event(enter, _, _, _) ->
@@ -86,19 +94,23 @@ handle_event(info, {gun_response, ConnPid, StreamRef, nofin, 200, _Headers}, {Ph
 	     #{conn := ConnPid, stream := StreamRef} = Data) ->
     {next_state, {Phase, data}, Data};
 
-handle_event(info, {gun_response, ConnPid, _StreamRef, fin, 200, _Headers}, {loading, _} = State,
-	     #{conn := ConnPid} = Data0) ->
+handle_event(info, {gun_response, ConnPid, _StreamRef, fin, 200, _Headers},
+	     {Phase = loading, _} = State, #{conn := ConnPid} = Data0) ->
     Data = handle_api_data(State, <<>>, Data0),
-    {next_state, {watch, init}, Data};
+
+    process_event_notify(Phase, done, Data),
+    {next_state, {watch, init}, Data#{conn := undefined, stream := undefined}};
 
 handle_event(info, {gun_response, ConnPid, StreamRef, fin, Status, _Headers}, _,
 	     #{conn := ConnPid, stream := StreamRef}) ->
     ?LOG(debug, "~p: stream closed with status ~p", [ConnPid, Status]),
     {stop, normal};
 
-handle_event(info, {gun_data, ConnPid, StreamRef, fin, Bin}, {_, data} = State,
+handle_event(info, {gun_data, ConnPid, StreamRef, fin, Bin}, {Phase, data} = State,
 	     #{conn := ConnPid, stream := StreamRef} = Data0) ->
     Data = handle_api_data(State, Bin, Data0),
+
+    process_event_notify(Phase, done, Data),
     {next_state, {watch, init}, Data#{conn := undefined, stream := undefined}};
 
 handle_event(info, {gun_data, ConnPid, StreamRef, nofin, Bin}, State,
@@ -116,6 +128,14 @@ handle_event(info, {gun_down, ConnPid, _Protocol, State, _Streams}, _, #{conn :=
 %%     ?LOG(info, "~p: got response ~p", [ConnPid, Reason]),
 %%     keep_state_and_data;
 
+handle_event(info, {'DOWN', _, process, ConnPid, Reason}, {watch, init}, #{conn := ConnPid}) ->
+    ?LOG(info, "~p: watch connection failed with ~p", [ConnPid, Reason]),
+    {stop, normal};
+
+handle_event(info, {'DOWN', _, process, ConnPid, Reason}, _, #{conn := ConnPid} = Data) ->
+    ?LOG(info, "~p: connection terminated with ~p", [ConnPid, Reason]),
+    {next_state, {watch, init}, Data#{conn := undefined, stream := undefined}};
+
 handle_event(_Ev, _Msg, _State, _Data) ->
     ?LOG(debug, "Ev: ~p, Msg: ~p, State: ~p", [_Ev, _Msg, _State]),
     keep_state_and_data.
@@ -130,58 +150,14 @@ code_change(_OldVsn, State, Data, _Extra) ->
 %%%  internal functions
 %%%=========================================================================
 
-api(Version, Path, #{server := #{path := Root}}) ->
-    lists:join($/, [Root, <<"api">>, Version|Path]).
-
-path(Version, false, Resource, Config) ->
-    api(Version, [Resource], Config);
-path(Version, true, Resource, #{namespace := Namespace} = Config) when is_binary(Namespace) ->
-    api(Version, [<<"namespaces">>, Namespace, Resource], Config);
-path(Version, Namespace, Resource, Config)
-  when is_list(Namespace); is_binary(Namespace) ->
-    api(Version, [<<"namespaces">>, Namespace, Resource], Config).
-
-path(#{version := Version, resource := Resource} = Watch, Config) ->
-    iolist_to_binary(path(Version, maps:get(namespace, Watch, true), Resource, Config)).
-
-to_bin(B) when is_binary(B) ->
-    B;
-to_bin(A) when is_atom(A) ->
-    atom_to_binary(A);
-to_bin(L) when is_list(L) ->
-    iolist_to_binary(L);
-to_bin(I) when is_integer(I) ->
-    integer_to_binary(I).
-
-query_kv({K, V}) ->
-    {to_bin(K), to_bin(V)}.
-
-query(Query, true) when is_map(Query) ->
-    query(Query#{watch => true});
-query(Query, _) ->
-    query(Query).
-
-query(Query) when is_map(Query) ->
-    Q = lists:map(fun query_kv/1, maps:to_list(Query)),
-    uri_string:compose_query(Q).
-
-query(#{resource := Resource} = Watch, DoWatch, Config,
-      #{resourceVersion := ResourceVersion}) ->
-    Parameter0 = maps:get(parameter, Watch, #{}),
-    Parameter = Parameter0#{resourceVersion => ResourceVersion},
-
-    Path = path(Resource, Config),
-    Query = query(Parameter, DoWatch),
-    uri_string:recompose(#{path => Path, query => Query}).
-
-headers() ->
-    [{<<"accept">>, <<"application/json">>}].
-
-headers(#{token := Token}) ->
-    [{<<"authorization">>, iolist_to_binary(["Bearer ", Token])}
-     | headers()];
-headers(_) ->
-    headers().
+query(QuerySpec, DoWatch, Config, #{resourceVersion := ResourceVersion}) ->
+    Parameter0 = maps:get(parameter, QuerySpec, #{}),
+    Parameter1 = Parameter0#{resourceVersion => ResourceVersion},
+    Parameter = case DoWatch of
+		    true -> Parameter1#{watch => true};
+		    _    -> Parameter1
+		end,
+    k8s_api_client_resource:query(QuerySpec#{parameter => Parameter}, Config).
 
 handle_api_data(State, Bin, #{pending := In} = Data) ->
     handle_api_data(State, Data#{pending := <<In/binary, Bin/binary>>}).
@@ -215,30 +191,35 @@ process_api_object({loading, _}, #{items := Items, metadata := Meta} = Ev, Data)
     lists:foreach(process_event(init, _, Data), Items),
     set_resource_version(Meta, Data).
 
-process_event(Type, Resource, #{tid := TID, watch := Watch}) ->
+process_event(Type, Resource, #{tid := TID} = Data) ->
     ?LOG(debug, "process_event, got ~p on ~p", [Type, Resource]),
     case Type of
 	delete ->
-	    ets:delete(TID, object_uid(Resource));
+	    ets:delete(TID, object_key(Resource));
 	_ ->
-	    ets:insert(TID, {object_uid(Resource), Resource})
+	    ets:insert(TID, {object_key(Resource), Resource})
     end,
-    process_event_notify(Type, Resource, Watch),
+    process_event_notify(Type, Resource, Data),
     ok.
 
-process_event_notify(Type, Resource, #{callback := Cb})
-  when is_function(Cb, 2) ->
-    Cb(Type, Resource);
+process_event_notify(Phase, done, _) when Phase =/= loading ->
+    ok;
+process_event_notify(Type, Resource, #{watch := #{callback := Cb}} = Data)
+  when is_function(Cb, 3) ->
+    Cb(handle(Data), Type, Resource);
 process_event_notify(_, _, _) ->
     ok.
+
+handle(#{tid := TID}) ->
+    {self(), TID}.
 
 atom(Bin) when is_binary(Bin) ->
     binary_to_atom(string:lowercase(Bin), latin1);
 atom(Atom) when is_atom(Atom) ->
     Atom.
 
-object_uid(#{metadata := #{uid := UID}}) ->
-    UID.
+object_key(#{metadata := #{namespace := Namespace, name := Name}}) ->
+    {Namespace, Name}.
 
 -if(0).
 
