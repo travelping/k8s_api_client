@@ -24,9 +24,15 @@
 start_pool() ->
     case k8s_api_client_cfg:get() of
 	#{server := #{host := Host, port := Port} = Server} = Config ->
-	    Opts0 = #{connect_timeout => ?HTTP_CONNECT_TIMEOUT,
-		      protocols => [http2, http]},
-	    Opts = tls_opts(Server, Config, Opts0),
+	    ConnOpts0 = #{connect_timeout => ?HTTP_CONNECT_TIMEOUT,
+			  protocols => [http2, http]},
+	    ConnOpts = tls_opts(Server, Config, ConnOpts0),
+
+	    %% gun_pool taking the transport key violated thes gun_pool:opts() type
+	    %% specification. This look like a bug in gun_pool. Lets duplicate the
+	    %% transport key into the pool opts just to be sure.
+	    Opts = #{transport => maps:get(transport, ConnOpts),
+		     conn_opts => ConnOpts},
 
 	    {ok, ManagerPid} = gun_pool:start_pool(Host, Port, Opts),
 
