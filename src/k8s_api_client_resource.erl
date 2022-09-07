@@ -145,7 +145,7 @@ post(Resource, Parameter, API, Body) ->
 
 patch(Resource, Item, Parameter, API, Body) ->
     Query = k8s_api_client_resource:query(Resource#{parameter => Parameter}, Item, API),
-    Headers = [{<<"content-type">>, <<"application/strategic-merge-patch+json">>}
+    Headers = [{<<"content-type">>, <<"application/merge-patch+json">>}
 	      | k8s_api_client_resource:headers(API)],
     io:format("PATCH Query: ~p~n", [Query]),
 
