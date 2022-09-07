@@ -193,13 +193,17 @@ process_api_object({loading, _}, #{items := Items, metadata := Meta} = Ev, Data)
 
 process_event(Type, Resource, #{tid := TID} = Data) ->
     ?LOG(debug, "process_event, got ~p on ~p", [Type, Resource]),
+    Old = case ets:lookup(TID, object_key(Resource)) of
+	      [{_, Object}] -> Object;
+	      _             -> undefined
+	  end,
     case Type of
 	delete ->
 	    ets:delete(TID, object_key(Resource));
 	_ ->
 	    ets:insert(TID, {object_key(Resource), Resource})
     end,
-    process_event_notify(Type, Resource, Data),
+    process_event_notify(Type, {Resource, Old}, Data),
     ok.
 
 process_event_notify(Phase, done, _) when Phase =/= loading ->
