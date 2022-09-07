@@ -182,14 +182,16 @@ json_equal(V1, V2) ->
 json_diff(M1, M2) when is_map(M1), is_map(M2) ->
     Diff = maps:from_keys(maps:keys(M1) -- maps:keys(M2), null),
     maps:fold(
-      fun(K, V, M) ->
+      fun(K, V, M) when is_map_key(K, M1) ->
 	      Old = maps:get(K, M1),
 	      case json_equal(Old, V) of
 		  false ->
 		      M#{K => json_diff(Old, V)};
 		  _ ->
 		      M
-	      end
+	      end;
+	 (K, V, M) ->
+	      M#{K => V}
       end, Diff, M2);
 json_diff(_, M2) ->
     M2.
