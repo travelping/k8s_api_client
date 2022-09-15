@@ -55,7 +55,8 @@ init(pod) ->
 	   Token <- file:read_file(filename:join(BasePath, "token")),
 	   return(
 	     #{token => Token,
-	       cacerts => [CA],
+	       cacerts => [DER ||
+			      {'Certificate', DER, not_encrypted} <- public_key:pem_decode(CA)],
 	       server => parse_uri(<<"https://kubernetes.default.svc">>),
 	       namespace => NameSpace})
        ]).
