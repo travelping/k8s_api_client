@@ -105,8 +105,25 @@ headers(Headers) when is_list(Headers) ->
 %%%  internal functions
 %%%=========================================================================
 
+-define(IPPROTO_TCP,		6).
+
+-define(TCP_KEEPIDLE,		4).	%% Start keeplives after this period
+-define(TCP_KEEPINTVL,		5).	%% Interval between keepalives
+-define(TCP_KEEPCNT,		6).	%% Number of keepalives before death
+
+tcp_opts() ->
+    tcp_opts(os:type(), [{keepalive, true}]).
+
+tcp_opts({_, linux}, Opts) ->
+    KeepIdle = 75,
+    KeepIntvl = 75,
+
+    [{raw, ?IPPROTO_TCP, ?TCP_KEEPIDLE, <<KeepIdle:32/native>>},
+     {raw, ?IPPROTO_TCP, ?TCP_KEEPINTVL, <<KeepIntvl:32/native>>}
+     | Opts ].
+
 tls_opts(#{scheme := "http"}, _, Opts) ->
-    Opts#{transport => tcp};
+    Opts#{transport => tcp, tcp_opts => tcp_opts()};
 tls_opts(#{scheme := "https"}, Config, Opts) ->
     TLSopts0 = maps:with([cert, key, cacerts], Config),
     TLSopts1 = TLSopts0#{alpn_advertised_protocols => [<<"h2">>, <<"http/1.1">>]},
@@ -117,6 +134,7 @@ tls_opts(#{scheme := "https"}, Config, Opts) ->
 	end,
     TLSopts = TLSopts1#{verify => VerifyType},
     Opts#{transport => tls,
+	  tcp_opts => tcp_opts(),
 	  tls_opts => maps:to_list(TLSopts)
 	 }.
 
