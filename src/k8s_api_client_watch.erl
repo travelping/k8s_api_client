@@ -121,12 +121,12 @@ handle_event(info, {gun_response, ConnPid, StreamRef, fin, Status, _Headers}, _,
 
 handle_event(info, {gun_data, ConnPid, StreamRef, nofin, _Bin} = Msg, {_Phase, error} = State,
 	     #{conn := ConnPid, stream := StreamRef} = _Data0) ->
-    ?LOG(debug, "ErrorEvMsg: ~p, State: ~p", [Msg, State]),
+    ?LOG(critical, "ErrorEvMsg: ~p, State: ~p", [Msg, State]),
     keep_state_and_data;
 
 handle_event(info, {gun_data, ConnPid, StreamRef, fin, _Bin} = Msg, {_Phase, error} = State,
 	     #{conn := ConnPid, stream := StreamRef} = _Data0) ->
-    ?LOG(debug, "ErrorEvMsg: ~p, State: ~p", [Msg, State]),
+    ?LOG(critical, "ErrorEvMsg: ~p, State: ~p", [Msg, State]),
 
     %% the normal supervisor restarts will deal with connection restarts, but here we
     %% are in a critical error state, kill the application to prevent supervisor restarts
@@ -147,6 +147,11 @@ handle_event(info, {gun_data, ConnPid, StreamRef, nofin, Bin}, State,
 
 handle_event(info, {gun_down, ConnPid, _Protocol, State, _Streams}, _, #{conn := ConnPid}) ->
     ?LOG(debug, "~p: connection closed with ~p", [ConnPid, State]),
+    {stop, normal};
+
+handle_event(info, {gun_error, ConnPid, StreamRef, Reason}, _,
+	     #{conn := ConnPid, stream := StreamRef}) ->
+    ?LOG(debug, "~p: connection closed with ~p", [ConnPid, Reason]),
     {stop, normal};
 
 %% handle_event(info, {gun_response, ConnPid, _StreamRef, fin, Status, _Headers} = _Msg, _State,
