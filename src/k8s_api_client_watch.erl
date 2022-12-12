@@ -74,7 +74,7 @@ init([Parent, Watch]) ->
 
 handle_event(enter, _, {watch, init}, #{pending := Pending})
   when Pending =/= <<>> ->
-    ?LOG(error, "initial load incomplete: ~p", [Pending]),
+    ?LOG(debug, "initial load incomplete: ~p", [Pending]),
     {stop, {error, incomplete}};
 
 handle_event(enter, _, {watch, init}, #{config := Config, watch := Watch} = Data) ->
@@ -94,6 +94,19 @@ handle_event(info, {gun_response, ConnPid, StreamRef, nofin, 200, _Headers}, {Ph
 	     #{conn := ConnPid, stream := StreamRef} = Data) ->
     {next_state, {Phase, data}, Data};
 
+handle_event(info, {gun_response, ConnPid, StreamRef, nofin, Status, _Headers}, {Phase, init},
+	     #{watch := Watch, conn := ConnPid, stream := StreamRef} = Data)
+  when Status >= 400 ->
+    ?LOG(critical, "k8s API requests for ~p failed with HTTP Status code ~p",
+	 [Watch, Status]),
+    {next_state, {Phase, error}, Data};
+
+handle_event(info, {gun_response, ConnPid, StreamRef, nofin, Status, _Headers}, {Phase, init},
+	     #{watch := Watch, conn := ConnPid, stream := StreamRef} = Data) ->
+    ?LOG(critical, "k8s API requests for ~p returned unexpected HTTP Status code ~p",
+	 [Watch, Status]),
+    {next_state, {Phase, error}, Data};
+
 handle_event(info, {gun_response, ConnPid, _StreamRef, fin, 200, _Headers},
 	     {Phase = loading, _} = State, #{conn := ConnPid} = Data0) ->
     Data = handle_api_data(State, <<>>, Data0),
@@ -104,6 +117,20 @@ handle_event(info, {gun_response, ConnPid, _StreamRef, fin, 200, _Headers},
 handle_event(info, {gun_response, ConnPid, StreamRef, fin, Status, _Headers}, _,
 	     #{conn := ConnPid, stream := StreamRef}) ->
     ?LOG(debug, "~p: stream closed with status ~p", [ConnPid, Status]),
+    {stop, normal};
+
+handle_event(info, {gun_data, ConnPid, StreamRef, nofin, _Bin} = Msg, {_Phase, error} = State,
+	     #{conn := ConnPid, stream := StreamRef} = _Data0) ->
+    ?LOG(critical, "ErrorEvMsg: ~p, State: ~p", [Msg, State]),
+    keep_state_and_data;
+
+handle_event(info, {gun_data, ConnPid, StreamRef, fin, _Bin} = Msg, {_Phase, error} = State,
+	     #{conn := ConnPid, stream := StreamRef} = _Data0) ->
+    ?LOG(critical, "ErrorEvMsg: ~p, State: ~p", [Msg, State]),
+
+    %% the normal supervisor restarts will deal with connection restarts, but here we
+    %% are in a critical error state, kill the application to prevent supervisor restarts
+    application:stop(k8s_api_client),
     {stop, normal};
 
 handle_event(info, {gun_data, ConnPid, StreamRef, fin, Bin}, {Phase, data} = State,
@@ -122,6 +149,11 @@ handle_event(info, {gun_down, ConnPid, _Protocol, State, _Streams}, _, #{conn :=
     ?LOG(debug, "~p: connection closed with ~p", [ConnPid, State]),
     {stop, normal};
 
+handle_event(info, {gun_error, ConnPid, StreamRef, Reason}, _,
+	     #{conn := ConnPid, stream := StreamRef}) ->
+    ?LOG(debug, "~p: connection closed with ~p", [ConnPid, Reason]),
+    {stop, normal};
+
 %% handle_event(info, {gun_response, ConnPid, _StreamRef, fin, Status, _Headers} = _Msg, _State,
 %%	     #{conn := ConnPid} = _Data) ->
 %%     ?LOG(debug, "Info: ~p, State: ~p", [_Msg, _State]),
@@ -129,15 +161,15 @@ handle_event(info, {gun_down, ConnPid, _Protocol, State, _Streams}, _, #{conn :=
 %%     keep_state_and_data;
 
 handle_event(info, {'DOWN', _, process, ConnPid, Reason}, {watch, init}, #{conn := ConnPid}) ->
-    ?LOG(info, "~p: watch connection failed with ~p", [ConnPid, Reason]),
+    ?LOG(debug, "~p: watch connection failed with ~p", [ConnPid, Reason]),
     {stop, normal};
 
 handle_event(info, {'DOWN', _, process, ConnPid, Reason}, _, #{conn := ConnPid} = Data) ->
-    ?LOG(info, "~p: connection terminated with ~p", [ConnPid, Reason]),
+    ?LOG(debug, "~p: connection terminated with ~p", [ConnPid, Reason]),
     {next_state, {watch, init}, Data#{conn := undefined, stream := undefined}};
 
 handle_event(_Ev, _Msg, _State, _Data) ->
-    ?LOG(debug, "Ev: ~p, Msg: ~p, State: ~p", [_Ev, _Msg, _State]),
+    ?LOG(error, "unhandled event: Ev: ~p, Msg: ~p, State: ~p", [_Ev, _Msg, _State]),
     keep_state_and_data.
 
 terminate(_Reason, _State, _Data) ->
@@ -177,7 +209,7 @@ process_api_data(State, Bin, Data0) ->
 	    process_api_object(State, Object, Data0);
 
 	Ev ->
-	    ?LOG(info, "unexpected message from k8s: ~p", [Ev]),
+	    ?LOG(error, "unexpected message from k8s: ~p", [Ev]),
 	    Data0
     end.
 

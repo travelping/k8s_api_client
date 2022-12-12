@@ -56,9 +56,19 @@ logger_gen_statem_trace(FuncState, {out,Reply,{To,_Tag}}, Name) ->
     ?LOG(debug, "~tp send ~tp to ~tw~n",
 	 [Name,Reply,To]),
     FuncState;
+%% OTP-23
 logger_gen_statem_trace(FuncState, {enter,State}, Name) ->
     ?LOG(debug, "~tp enter in state ~tp~n",
 	 [Name,State]),
+    FuncState;
+%% OTP 24+
+logger_gen_statem_trace(FuncState, {enter,Module,State}, Name) ->
+    ?LOG(debug, "~tp enter ~tp in state ~tp~n",
+	 [Name,Module,State]),
+    FuncState;
+logger_gen_statem_trace(FuncState, {module,Module,State}, Name) ->
+    ?LOG(debug, "~tp module ~tp in state ~tp~n",
+	 [Name,Module,State]),
     FuncState;
 logger_gen_statem_trace(FuncState, {start_timer,Action,State}, Name) ->
     ?LOG(debug, "~tp start_timer ~tp in state ~tp~n",
